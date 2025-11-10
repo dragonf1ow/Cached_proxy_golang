@@ -63,19 +63,20 @@ func (c *Cache) AddItem(url string, statuscode int, header http.Header, body []b
 	}
 }
 
-func (c *Cache) CheckValue(url string) bool {
-	for key, _ := range c.items {
-		if key == url {
-			return true
-		}
-	}
+// func (c *Cache) CheckValue(url string) bool {
+// 	for key, _ := range c.items {
+// 		if key == url {
+// 			return true
+// 		}
+// 	}
 
-	return false
-}
+// 	return false
+// }
 
 func (c *Cache) GetItem(url string) (*Item, bool) {
+	c.m.RLock()
 	item, found := c.items[url]
-
+	c.m.RUnlock()
 	if !found {
 		return nil, false
 	}
@@ -97,6 +98,7 @@ func ProxyHandler(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path == "/favicon.ico" {
 		http.NotFound(w, r)
 		log.Println("Page favicon.ico not found!")
+		return
 	}
 
 	var targetURL string
@@ -126,45 +128,52 @@ func ProxyHandler(w http.ResponseWriter, r *http.Request) {
 		log.Println("Page from Cache")
 		return
 
-	} else {
-
-		client := &http.Client{
-			Timeout: 30 * time.Second,
-		}
-		go func() {
-
-			resp, err := client.Get(targetURL)
-			if err != nil {
-				log.Println(err)
-
-				w.Write([]byte("Ошибка при запросе"))
-				return
-			}
-
-			defer resp.Body.Close()
-
-			body, _ := io.ReadAll(resp.Body)
-
-			go cache.AddItem(targetURL, resp.StatusCode, resp.Header, body, 0)
-
-			for key, values := range resp.Header {
-				for _, value := range values {
-					w.Header().Add(key, value)
-				}
-
-			}
-			w.WriteHeader(resp.StatusCode)
-
-			w.Write(body)
-		}()
 	}
+
+	client := &http.Client{
+		Timeout: 30 * time.Second,
+	}
+
+	resp, err := client.Get(targetURL)
+	if err != nil {
+		log.Println(err)
+
+		w.Write([]byte("Ошибка при запросе"))
+		return
+	}
+
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+
+	if resp.StatusCode == http.StatusOK {
+		//Есть вероятность изменения данных в процессе работы горутины, поэому сделал с копированием данных и передачей их в горутину
+		go func(
+			targetURL string,
+			StatusCode int,
+			header http.Header,
+			body []byte,
+		) {
+			cache.AddItem(targetURL, StatusCode, header, body, 0)
+		}(targetURL, resp.StatusCode, resp.Header.Clone(), body)
+	}
+
+	for key, values := range resp.Header {
+		for _, value := range values {
+			w.Header().Add(key, value)
+		}
+
+	}
+	w.WriteHeader(resp.StatusCode)
+
+	w.Write(body)
 
 }
 
 var cache = NewCache(5*time.Minute, 10*time.Minute)
 
 func main() {
-	go http.HandleFunc("/", ProxyHandler)
+	http.HandleFunc("/", ProxyHandler)
 
 	server := &http.Server{
 		Addr:    ":8080",
